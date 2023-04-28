@@ -1,2 +1,2 @@
-# JaxSpeechX
-Fast and Effortless Speech Recognition Deployment with JAX
+## JaxSpeechX
+JaxSpeechX Toolkit is an open-source speech recognition project that uses the JAX deep learning library for model training and provides pre-trained models.
