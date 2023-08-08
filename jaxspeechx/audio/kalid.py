@@ -1,4 +1,6 @@
 import tensorflow as tf
+from typing import Tuple
+
 import math
 
 HAMMING = "hamming"
@@ -16,18 +18,6 @@ MILLISECONDS_TO_SECONDS = 0.001
 def _next_power_of_2(x: int) -> int:
   r"""Returns the smallest power of 2 that is greater than x"""
   return 1 if x == 0 else 2 ** (x - 1).bit_length()
-
-def inverse_mel_scale_scalar(mel_freq):
-    return 700.0 * (tf.exp(mel_freq / 1127.0) - 1.0)
-
-def inverse_mel_scale(mel_freq):
-    return 700.0 * (tf.exp(mel_freq / 1127.0) - 1.0)
-
-def mel_scale_scalar(freq):
-    return 1127.0 * tf.math.log(1.0 + freq / 700.0)
-
-def mel_scale(freq):
-    return 1127.0 * tf.math.log(1.0 + freq / 700.0)
 
 def _get_log_energy(strided_input: tf.Tensor, epsilon: tf.Tensor, energy_floor: float) -> tf.Tensor:
     r"""Returns the log energy of size (m) for a strided_input (m,*)"""
@@ -129,12 +119,14 @@ def _get_window(
     remove_dc_offset,
     preemphasis_coefficient,
 ):
-    epsilon = np.finfo(waveform.dtype.as_numpy_dtype).eps
+    epsilon = EPSILON
 
     # size (m, window_size)
     strided_input = _get_strided(waveform, window_size, window_shift, snip_edges)
 
     if dither != 0.0:
+        # NOTE(Mddct): tf.random.stateless_xxx is encouraged after tf2.11
+        # TODO(Mddct): refiner later  using stateless_xxx with split generator
         rand_gauss = tf.random.normal(strided_input.shape, dtype=waveform.dtype)
         strided_input = strided_input + rand_gauss * dither
 
@@ -168,6 +160,113 @@ def _get_window(
 
     return strided_input, signal_log_energy
 
+def _subtract_column_mean(tensor: tf.Tensor, subtract_mean: bool) -> tf.Tensor:
+    # subtracts the column mean of the tensor size (m, n) if subtract_mean=True
+    # it returns size (m, n)
+    if subtract_mean:
+        col_means = tf.reduce_mean(tensor, axis=0, keepdims=True)
+        tensor = tensor - col_means
+    return tensor
+
+def spectrogram(
+    waveform: tf.Tensor,
+    blackman_coeff: float = 0.42,
+    channel: int = -1,
+    dither: float = 0.0,
+    energy_floor: float = 1.0,
+    frame_length: float = 25.0,
+    frame_shift: float = 10.0,
+    min_duration: float = 0.0,
+    preemphasis_coefficient: float = 0.97,
+    raw_energy: bool = True,
+    remove_dc_offset: bool = True,
+    round_to_power_of_two: bool = True,
+    sample_frequency: float = 16000.0,
+    snip_edges: bool = True,
+    subtract_mean: bool = False,
+    window_type: str = "povey",
+) -> tf.Tensor:
+    r"""Create a spectrogram from a raw audio signal. This matches the input/output of Kaldi's
+    compute-spectrogram-feats.
+
+    Args:
+        waveform (tf.Tensor): Tensor of audio of size (c, n) where c is in the range [0,2)
+        blackman_coeff (float, optional): Constant coefficient for generalized Blackman window. (Default: ``0.42``)
+        channel (int, optional): Channel to extract (-1 -> expect mono, 0 -> left, 1 -> right) (Default: ``-1``)
+        dither (float, optional): Dithering constant (0.0 means no dither). If you turn this off, you should set
+            the energy_floor option, e.g. to 1.0 or 0.1 (Default: ``0.0``)
+        energy_floor (float, optional): Floor on energy (absolute, not relative) in Spectrogram computation.  Caution:
+            this floor is applied to the zeroth component, representing the total signal energy.  The floor on the
+            individual spectrogram elements is fixed at tf.keras.backend.epsilon(). (Default: ``1.0``)
+        frame_length (float, optional): Frame length in milliseconds (Default: ``25.0``)
+        frame_shift (float, optional): Frame shift in milliseconds (Default: ``10.0``)
+        min_duration (float, optional): Minimum duration of segments to process (in seconds). (Default: ``0.0``)
+        preemphasis_coefficient (float, optional): Coefficient for use in signal preemphasis (Default: ``0.97``)
+        raw_energy (bool, optional): If True, compute energy before preemphasis and windowing (Default: ``True``)
+        remove_dc_offset (bool, optional): Subtract mean from waveform on each frame (Default: ``True``)
+        round_to_power_of_two (bool, optional): If True, round window size to power of two by zero-padding input
+            to FFT. (Default: ``True``)
+        sample_frequency (float, optional): Waveform data sample frequency (must match the waveform file, if
+            specified there) (Default: ``16000.0``)
+        snip_edges (bool, optional): If True, end effects will be handled by outputting only frames that completely fit
+            in the file, and the number of frames depends on the frame_length.  If False, the number of frames
+            depends only on the frame_shift, and we reflect the data at the ends. (Default: ``True``)
+        subtract_mean (bool, optional): Subtract mean of each feature file [CMS]; not recommended to do
+            it this way.  (Default: ``False``)
+        window_type (str, optional): Type of window ('hamming'|'hanning'|'povey'|'rectangular'|'blackman')
+         (Default: ``'povey'``)
+
+    Returns:
+        tf.Tensor: A spectrogram identical to what Kaldi would output. The shape is
+        (m, ``padded_window_size // 2 + 1``) where m is calculated in _get_strided
+    """
+    epsilon = EPSILON
+
+    waveform, window_shift, window_size, padded_window_size = _get_waveform_and_window_properties(
+        waveform, channel, sample_frequency, frame_shift, frame_length, round_to_power_of_two, preemphasis_coefficient
+    )
+    # NOTE(Mddct): tf graph mode using tf.function
+    # TODO(Mddct): tf.cond to return short empty signal
+    # if len(waveform) < min_duration * sample_frequency:
+    #     # signal is too short
+    #     return tf.constant([], dtype=tf.float32)
+
+    strided_input, signal_log_energy = _get_window(
+        waveform,
+        padded_window_size,
+        window_size,
+        window_shift,
+        window_type,
+        blackman_coeff,
+        snip_edges,
+        raw_energy,
+        energy_floor,
+        dither,
+        remove_dc_offset,
+        preemphasis_coefficient,
+    )
+
+    # Size (m, padded_window_size // 2 + 1, 2)
+    fft = tf.signal.rfft(strided_input)
+
+    # Convert the FFT into a power spectrum
+    power_spectrum = tf.math.log(tf.maximum(tf.abs(fft) ** 2.0, epsilon))  # Size (m, padded_window_size // 2 + 1)
+    power_spectrum = tf.tensor_scatter_nd_update(power_spectrum, [[0]], tf.expand_dims(signal_log_energy, axis=-1))
+
+    power_spectrum = _subtract_column_mean(power_spectrum, subtract_mean)
+    return power_spectrum
+
+def inverse_mel_scale_scalar(mel_freq):
+    return 700.0 * (tf.exp(mel_freq / 1127.0) - 1.0)
+
+def inverse_mel_scale(mel_freq):
+    return 700.0 * (tf.exp(mel_freq / 1127.0) - 1.0)
+
+def mel_scale_scalar(freq):
+    return 1127.0 * tf.math.log(1.0 + freq / 700.0)
+
+def mel_scale(freq):
+    return 1127.0 * tf.math.log(1.0 + freq / 700.0)
 
 def vtln_warp_freq(
     vtln_low_cutoff,
@@ -203,7 +302,7 @@ def vtln_warp_freq(
     res = tf.where(outside_low_high_freq, freq, res)
 
     return res
-    
+
 def vtln_warp_mel_freq(
     vtln_low_cutoff,
     vtln_high_cutoff,
@@ -215,3 +314,303 @@ def vtln_warp_mel_freq(
     warped_freq = vtln_warp_freq(vtln_low_cutoff, vtln_high_cutoff, low_freq, high_freq, vtln_warp_factor, inverse_mel_scale(mel_freq))
     warped_mel_freq = mel_scale(warped_freq)
     return warped_mel_freq
+
+def get_mel_banks(
+    num_bins: int,
+    window_length_padded: int,
+    sample_freq: float,
+    low_freq: float,
+    high_freq: float,
+    vtln_low: float,
+    vtln_high: float,
+    vtln_warp_factor: float,
+) -> Tuple[tf.Tensor, tf.Tensor]:
+    """
+    Returns:
+        (tf.Tensor, tf.Tensor): The tuple consists of ``bins`` (which is
+        melbank of size (``num_bins``, ``num_fft_bins``)) and ``center_freqs`` (which is
+        center frequencies of bins of size (``num_bins``)).
+    """
+    assert num_bins > 3, "Must have at least 3 mel bins"
+    assert window_length_padded % 2 == 0
+    num_fft_bins = window_length_padded // 2
+    nyquist = 0.5 * sample_freq
+
+    if high_freq <= 0.0:
+        high_freq += nyquist
+
+    assert (
+        (0.0 <= low_freq < nyquist) and (0.0 < high_freq <= nyquist) and (low_freq < high_freq)
+    ), "Bad values in options: low-freq {} and high-freq {} vs. nyquist {}".format(low_freq, high_freq, nyquist)
+
+    # fft-bin width [think of it as Nyquist-freq / half-window-length]
+    fft_bin_width = sample_freq / window_length_padded
+    mel_low_freq = mel_scale_scalar(low_freq)
+    mel_high_freq = mel_scale_scalar(high_freq)
+
+    # divide by num_bins+1 in next line because of end-effects where the bins
+    # spread out to the sides.
+    mel_freq_delta = (mel_high_freq - mel_low_freq) / (num_bins + 1)
+
+    if vtln_high < 0.0:
+        vtln_high += nyquist
+
+    assert vtln_warp_factor == 1.0 or (
+        (low_freq < vtln_low < high_freq) and (0.0 < vtln_high < high_freq) and (vtln_low < vtln_high)
+    ), "Bad values in options: vtln-low {} and vtln-high {}, versus " "low-freq {} and high-freq {}".format(
+        vtln_low, vtln_high, low_freq, high_freq
+    )
+
+    bin = tf.expand_dims(tf.range(num_bins, dtype=tf.float32), axis=1)
+    left_mel = mel_low_freq + bin * mel_freq_delta  # size(num_bins, 1)
+    center_mel = mel_low_freq + (bin + 1.0) * mel_freq_delta  # size(num_bins, 1)
+    right_mel = mel_low_freq + (bin + 2.0) * mel_freq_delta  # size(num_bins, 1)
+
+    if vtln_warp_factor != 1.0:
+        left_mel = vtln_warp_mel_freq(vtln_low, vtln_high, low_freq, high_freq, vtln_warp_factor, left_mel)
+        center_mel = vtln_warp_mel_freq(vtln_low, vtln_high, low_freq, high_freq, vtln_warp_factor, center_mel)
+        right_mel = vtln_warp_mel_freq(vtln_low, vtln_high, low_freq, high_freq, vtln_warp_factor, right_mel)
+
+    center_freqs = inverse_mel_scale(center_mel)  # size (num_bins)
+    # size(1, num_fft_bins)
+    mel = mel_scale(fft_bin_width * tf.range(num_fft_bins, dtype=tf.float32))[tf.newaxis, :]
+
+    # size (num_bins, num_fft_bins)
+    up_slope = (mel - left_mel) / (center_mel - left_mel)
+    down_slope = (right_mel - mel) / (right_mel - center_mel)
+
+    if vtln_warp_factor == 1.0:
+        # left_mel < center_mel < right_mel so we can min the two slopes and clamp negative values
+        bins = tf.maximum(tf.zeros((1, num_fft_bins), dtype=tf.float32), tf.minimum(up_slope, down_slope))
+    else:
+        # warping can move the order of left_mel, center_mel, right_mel anywhere
+        bins = tf.zeros_like(up_slope, dtype=tf.float32)
+        up_idx = tf.logical_and(tf.greater(mel, left_mel), tf.less_equal(mel, center_mel))  # left_mel < mel <= center_mel
+        down_idx = tf.logical_and(tf.greater(mel, center_mel), tf.less(mel， right_mel))  # center_mel < mel < right_mel
+        bins = tf.where(up_idx, up_slope, bins)
+        bins = tf.where(down_idx, down_slope, bins)
+
+    return bins, center_freqs
+
+def fbank(
+    waveform,
+    blackman_coeff=0.42,
+    channel=-1,
+    dither=0.0,
+    energy_floor=1.0,
+    frame_length=25.0,
+    frame_shift=10.0,
+    high_freq=0.0,
+    htk_compat=False,
+    low_freq=20.0,
+    min_duration=0.0,
+    num_mel_bins=23,
+    preemphasis_coefficient=0.97,
+    raw_energy=True,
+    remove_dc_offset=True,
+    round_to_power_of_two=True,
+    sample_frequency=16000.0,
+    snip_edges=True,
+    subtract_mean=False,
+    use_energy=False,
+    use_log_fbank=True,
+    use_power=True,
+    vtln_high=-500.0,
+    vtln_low=100.0,
+    vtln_warp=1.0,
+    window_type='povey'
+):
+    waveform = tf.convert_to_tensor(waveform)
+    device, dtype = waveform.device, waveform.dtype
+
+    waveform, window_shift, window_size, padded_window_size = _get_waveform_and_window_properties(
+        waveform, channel, sample_frequency, frame_shift, frame_length, round_to_power_of_two, preemphasis_coefficient
+    )
+    # NOTE(Mddct): tf graph mode using tf.
+    # TODO(Mddct): tf.cond to return short empty signal
+    # if len(waveform) < min_duration * sample_frequency:
+    #     # signal is too short
+    #     return tf.constant([], dtype=dtype)
+
+    # strided_input, size (m, padded_window_size) and signal_log_energy, size (m)
+    strided_input, signal_log_energy = _get_window(
+        waveform,
+        padded_window_size,
+        window_size,
+        window_shift,
+        window_type,
+        blackman_coeff,
+        snip_edges,
+        raw_energy,
+        energy_floor,
+        dither,
+        remove_dc_offset,
+        preemphasis_coefficient,
+    )
+
+    # size (m, padded_window_size // 2 + 1)
+    spectrum = tf.abs(tf.signal.rfft(strided_input))
+    if use_power:
+        spectrum = tf.pow(spectrum, 2.0)
+
+    # size (num_mel_bins, padded_window_size // 2)
+    mel_energies, _ = get_mel_banks(
+        num_mel_bins, padded_window_size, sample_frequency, low_freq, high_freq, vtln_low, vtln_high, vtln_warp
+    )
+    mel_energies = tf.cast(mel_energies, dtype=dtype)
+
+    # pad right column with zeros and add dimension, size (num_mel_bins, padded_window_size // 2 + 1)
+    mel_energies = tf.pad(mel_energies, [[0, 0], [0, 1]], constant_values=0)
+
+    # sum with mel filterbanks over the power spectrum, size (m, num_mel_bins)
+    mel_energies = tf.matmul(spectrum, tf.transpose(mel_energies))
+    if use_log_fbank:
+        # avoid log of zero (which should be prevented anyway by dithering)
+        mel_energies = tf.math.log(tf.maximum(mel_energies, _get_epsilon(device, dtype)))
+
+    # if use_energy then add it as the last column for htk_compat == true else first column
+    if use_energy:
+        signal_log_energy = tf.expand_dims(signal_log_energy, axis=1)  # size (m, 1)
+        # returns size (m, num_mel_bins + 1)
+        if htk_compat:
+            mel_energies = tf.concat([mel_energies, signal_log_energy], axis=1)
+        else:
+            mel_energies = tf.concat([signal_log_energy, mel_energies], axis=1)
+
+    mel_energies = _subtract_column_mean(mel_energies, subtract_mean)
+    return mel_energies
+
+def _get_dct_matrix(num_ceps, num_mel_bins):
+  """Returns a DCT matrix of size (num_mel_bins, num_ceps).
+
+  Args:
+    num_ceps: The number of cepstral coefficients.
+    num_mel_bins: The number of mel bins.
+
+  Returns:
+    A DCT matrix of size (num_mel_bins, num_ceps).
+  """
+
+  dct_matrix = tf.signal.dct(tf.eye(num_mel_bins))
+  # kaldi expects the first cepstral to be weighted sum of factor sqrt(1/num_mel_bins)
+  # this would be the first column in the dct_matrix for TensorFlow as it expects a
+  # right multiply (which would be the first column of the kaldi's dct_matrix as kaldi
+  # expects a left multiply e.g. dct_matrix * vector).
+  # TODO(Mddct): check whether can work in tf graph mode
+  dct_matrix = tf.tensor_scatter_nd_update(
+      dct_matrix,
+      [[(i, 0)] for i in range(num_mel_bins)],
+      tf.sqrt(1 / tf.cast(num_mel_bins, dtype=dct_matrix.dtype)))
+  dct_matrix = dct_matrix[:, :num_ceps]
+  return dct_matrix
+
+def _get_lifter_coeffs(num_ceps: int, cepstral_lifter: float) -> tf.Tensor:
+  """Returns a liftering coefficients of size (num_ceps).
+
+  Args:
+    num_ceps: The number of cepstral coefficients.
+    cepstral_lifter: The cepstral lifter coefficient.
+
+  Returns:
+    A liftering coefficients of size (num_ceps).
+  """
+
+  i = tf.range(num_ceps)
+  return 1.0 + 0.5 * cepstral_lifter * tf.sin(tf.math.pi * i / cepstral_lifter)
+
+def mfcc(
+    waveform,
+    blackman_coeff=0.42,
+    cepstral_lifter=22.0,
+    channel=-1,
+    dither=0.0,
+    energy_floor=1.0,
+    frame_length=25.0,
+    frame_shift=10.0,
+    high_freq=0.0,
+    htk_compat=False,
+    low_freq=20.0,
+    num_ceps=13,
+    min_duration=0.0,
+    num_mel_bins=23,
+    preemphasis_coefficient=0.97,
+    raw_energy=True,
+    remove_dc_offset=True,
+    round_to_power_of_two=True,
+    sample_frequency=16000.0,
+    snip_edges=True,
+    subtract_mean=False,
+    use_energy=False,
+    vtln_high=-500.0,
+    vtln_low=100.0,
+    vtln_warp=1.0,
+    window_type="povey",
+):
+    assert num_ceps <= num_mel_bins, "num_ceps cannot be larger than num_mel_bins: %d vs %d" % (num_ceps, num_mel_bins)
+
+    # The mel_energies should not be squared (use_power=True), not have mean subtracted
+    # (subtract_mean=False), and use log (use_log_fbank=True).
+    # size (m, num_mel_bins + use_energy)
+    feature = fbank(
+        waveform=waveform,
+        blackman_coeff=blackman_coeff,
+        channel=channel,
+        dither=dither,
+        energy_floor=energy_floor,
+        frame_length=frame_length,
+        frame_shift=frame_shift,
+        high_freq=high_freq,
+        htk_compat=htk_compat,
+        low_freq=low_freq,
+        min_duration=min_duration,
+        num_mel_bins=num_mel_bins,
+        preemphasis_coefficient=preemphasis_coefficient,
+        raw_energy=raw_energy,
+        remove_dc_offset=remove_dc_offset,
+        round_to_power_of_two=round_to_power_of_two,
+        sample_frequency=sample_frequency,
+        snip_edges=snip_edges,
+        subtract_mean=False,
+        use_energy=use_energy,
+        use_log_fbank=True,
+        use_power=True,
+        vtln_high=vtln_high,
+        vtln_low=vtln_low,
+        vtln_warp=vtln_warp,
+        window_type=window_type,
+    )
+
+    if use_energy:
+        # size (m)
+        signal_log_energy = feature[:, num_mel_bins if htk_compat else 0]
+        # offset is 0 if htk_compat==True else 1
+        mel_offset = int(not htk_compat)
+        feature = feature[:, mel_offset : (num_mel_bins + mel_offset)]
+
+    # size (num_mel_bins, num_ceps)
+    dct_matrix = _get_dct_matrix(num_ceps, num_mel_bins)
+
+    # size (m, num_ceps)
+    feature = tf.matmul(feature, dct_matrix)
+
+    if cepstral_lifter != 0.0:
+        # size (1, num_ceps)
+        lifter_coeffs = _get_lifter_coeffs(num_ceps, cepstral_lifter)[None, :]
+        feature *= lifter_coeffs
+
+    # if use_energy then replace the last column for htk_compat == true else first column
+    if use_energy:
+        feature[:, 0] = signal_log_energy
+
+    if htk_compat:
+        energy = feature[:, 0][:, tf.newaxis]  # size (m, 1)
+        feature = feature[:, 1:]  # size (m, num_ceps - 1)
+        if not use_energy:
+            # scale on C0 (actually removing a scale we previously added that's
+            # part of one common definition of the cosine transform.)
+            energy *= math.sqrt(2)
+
+        feature = tf.concat((feature, energy), axis=1)
+
+    feature = _subtract_column_mean(feature, subtract_mean)
+    return feature
