@@ -516,20 +516,20 @@ def fbank(waveform,
 
     # NOTE(Mddct): tf.signal.rfft is slow than torch fft
     # size (m, padded_window_size // 2 + 1)
-    def fast_rfft(input: tf.Tensor):
-        input_dl = tf.experimental.dlpack.to_dlpack(input)
-        input_jax = jax.dlpack.from_dlpack(input_dl)
-        output_jax = jax.numpy.fft.rfft(input_jax)
-        # output_jax = jax.numpy.abs(output_jax)
-        # if use_power:
-        #     output_jax = jax.lax.pow(output_jax, 2.0)
-        out_dl = jax.dlpack.to_dlpack(output_jax)
-        out_tf = tf.experimental.dlpack.from_dlpack(out_dl)
-        return out_tf
+    # def fast_rfft(input: tf.Tensor):
+    #     input_dl = tf.experimental.dlpack.to_dlpack(input)
+    #     input_jax = jax.dlpack.from_dlpack(input_dl)
+    #     output_jax = jax.numpy.fft.rfft(input_jax)
+    #     # output_jax = jax.numpy.abs(output_jax)
+    #     # if use_power:
+    #     #     output_jax = jax.lax.pow(output_jax, 2.0)
+    #     out_dl = jax.dlpack.to_dlpack(output_jax)
+    #     out_tf = tf.experimental.dlpack.from_dlpack(out_dl)
+    #     return out_tf
 
-    spectrum = tf.abs(
-        tf.py_function(fast_rfft, inp=[strided_input], Tout=tf.complex64))
-    # spectrum = tf.abs(tf.signal.rfft(strided_input))
+    # spectrum = tf.abs(
+    #     tf.py_function(fast_rfft, inp=[strided_input], Tout=tf.complex64))
+    spectrum = tf.abs(tf.signal.rfft(strided_input))
     if use_power:
         spectrum = tf.pow(spectrum, 2.0)
 
