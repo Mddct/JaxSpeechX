@@ -15,22 +15,10 @@ EPSILON = tf.constant(tf.keras.backend.epsilon(), dtype=tf.float32)
 # 1 milliseconds = 0.001 seconds
 MILLISECONDS_TO_SECONDS = tf.constant(0.001, dtype=tf.float32)
 
-# def _next_power_of_2(x: int) -> int:
-#   r"""Returns the smallest power of 2 that is greater than x"""
-#   return 1 if x == 0 else 2 ** (x - 1).bit_length()
-
-
-def _next_power_of_2(x: tf.Tensor) -> tf.Tensor:
-    zero = tf.constant(0, dtype=x.dtype)
-    one = tf.constant(1, dtype=x.dtype)
-    x_equal_zero = tf.equal(x, zero)
-    x_minus_one = x - one
-    x_minus_one = tf.cast(x_minus_one, dtype=tf.float32)
-    x_minus_one_bit_length = tf.math.ceil(
-        tf.math.log(x_minus_one + 1.) / tf.math.log(2.))
-    x_minus_one_bit_length = tf.cast(x_minus_one_bit_length, dtype=x.dtype)
-    result = tf.where(x_equal_zero, one, tf.pow(2, x_minus_one_bit_length))
-    return result
+def _next_power_of_2(x):
+    x = tf.cast(x, dtype=tf.float32)
+    return tf.cast(2**tf.math.ceil(tf.math.log(x) / tf.math.log(2.)),
+                   dtype=tf.int32)
 
 
 def _get_log_energy(strided_input: tf.Tensor, epsilon: tf.Tensor,
@@ -102,7 +90,7 @@ def _get_waveform_and_window_properties(
 ) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
     channel = max(channel, 0)
     tf.debugging.assert_less(channel,
-                             waveform.shape[0],
+                             tf.shape(waveform)[0],
                              message="Invalid channel size")
     waveform = waveform[channel, :]  # size (n)
     sample_frequency_f = tf.cast(sample_frequency,
@@ -120,7 +108,7 @@ def _get_waveform_and_window_properties(
                                    window_size,
                                    message="choose a window size")
     tf.debugging.assert_less_equal(window_size,
-                                   waveform.shape[0],
+                                   tf.shape(waveform),
                                    message="choose a window size")
     tf.debugging.assert_greater(window_shift,
                                 0,
@@ -467,6 +455,10 @@ def get_mel_banks(
     return bins, center_freqs
 
 
+import jax
+import jax.dlpack
+
+
 @tf.function
 def fbank(waveform,
           blackman_coeff=0.42,
@@ -508,9 +500,9 @@ def fbank(waveform,
     # if len(waveform) < min_duration * sample_frequency:
     #     # signal is too short
     #     return tf.constant([], dtype=dtype)
-    tf.debugging.assert_greater_equal(
-        tf.cast(waveform.shape[0], dtype=tf.float32),
-        min_duration * tf.cast(sample_frequency, dtype=tf.float32))
+    # tf.debugging.assert_greater_equal(
+    #     tf.cast(waveform.shape[0], dtype=tf.float32),
+    #     min_duration * tf.cast(sample_frequency, dtype=tf.float32))
 
     # strided_input, size (m, padded_window_size) and signal_log_energy, size (m)
     strided_input, signal_log_energy = _get_window(
@@ -528,8 +520,22 @@ def fbank(waveform,
         preemphasis_coefficient,
     )
 
+    # NOTE(Mddct): tf.signal.rfft is slow than torch fft
     # size (m, padded_window_size // 2 + 1)
-    spectrum = tf.abs(tf.signal.rfft(strided_input))
+    def fast_rfft(input: tf.Tensor):
+        input_dl = tf.experimental.dlpack.to_dlpack(input)
+        input_jax = jax.dlpack.from_dlpack(input_dl)
+        output_jax = jax.numpy.fft.rfft(input_jax)
+        # output_jax = jax.numpy.abs(output_jax)
+        # if use_power:
+        #     output_jax = jax.lax.pow(output_jax, 2.0)
+        out_dl = jax.dlpack.to_dlpack(output_jax)
+        out_tf = tf.experimental.dlpack.from_dlpack(out_dl)
+        return out_tf
+
+    spectrum = tf.abs(
+        tf.py_function(fast_rfft, inp=[strided_input], Tout=tf.complex64))
+    # spectrum = tf.abs(tf.signal.rfft(strided_input))
     if use_power:
         spectrum = tf.pow(spectrum, 2.0)
 
