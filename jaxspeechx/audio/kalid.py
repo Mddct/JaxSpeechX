@@ -454,12 +454,6 @@ def get_mel_banks(
 
     return bins, center_freqs
 
-
-import jax
-import jax.dlpack
-
-
-@tf.function
 def fbank(waveform,
           blackman_coeff=0.42,
           channel=-1,
