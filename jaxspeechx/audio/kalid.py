@@ -15,6 +15,7 @@ EPSILON = tf.constant(tf.keras.backend.epsilon(), dtype=tf.float32)
 # 1 milliseconds = 0.001 seconds
 MILLISECONDS_TO_SECONDS = tf.constant(0.001, dtype=tf.float32)
 
+
 def _next_power_of_2(x):
     x = tf.cast(x, dtype=tf.float32)
     return tf.cast(2**tf.math.ceil(tf.math.log(x) / tf.math.log(2.)),
@@ -287,8 +288,9 @@ def spectrogram(
     # Convert the FFT into a power spectrum
     power_spectrum = tf.math.log(tf.maximum(
         tf.abs(fft)**2.0, epsilon))  # Size (m, padded_window_size // 2 + 1)
-    power_spectrum = tf.tensor_scatter_nd_update(
-        power_spectrum, [[0]], tf.expand_dims(signal_log_energy, axis=-1))
+    power_spectrum = tf.concat(
+        [tf.expand_dims(signal_log_energy, axis=1), power_spectrum[:, 1:]],
+        axis=1)
 
     power_spectrum = _subtract_column_mean(power_spectrum, subtract_mean)
     return power_spectrum
@@ -454,6 +456,7 @@ def get_mel_banks(
 
     return bins, center_freqs
 
+
 def fbank(waveform,
           blackman_coeff=0.42,
           channel=-1,
@@ -562,44 +565,33 @@ def fbank(waveform,
     return mel_energies
 
 
-def _get_dct_matrix(num_ceps, num_mel_bins):
-    """Returns a DCT matrix of size (num_mel_bins, num_ceps).
+def _get_dct_matrix(num_ceps: int, num_mel_bins: int) -> tf.Tensor:
+    # Create DCT basis
+    basis = tf.signal.dct(tf.eye(num_mel_bins), type=2, norm='ortho')
+    # Kaldi expects the first cepstral to be a weighted sum of factor sqrt(1/num_mel_bins)
+    basis = tf.tensor_scatter_nd_update(
+        basis, [[i, 0] for i in range(num_mel_bins)],
+        [math.sqrt(1.0 / num_mel_bins)] * num_mel_bins)
 
-  Args:
-    num_ceps: The number of cepstral coefficients.
-    num_mel_bins: The number of mel bins.
+    # We only keep num_ceps coefficients
+    basis = basis[:, :num_ceps]
 
-  Returns:
-    A DCT matrix of size (num_mel_bins, num_ceps).
-  """
-
-    dct_matrix = tf.signal.dct(tf.eye(num_mel_bins))
-    # kaldi expects the first cepstral to be weighted sum of factor sqrt(1/num_mel_bins)
-    # this would be the first column in the dct_matrix for TensorFlow as it expects a
-    # right multiply (which would be the first column of the kaldi's dct_matrix as kaldi
-    # expects a left multiply e.g. dct_matrix * vector).
-    # TODO(Mddct): check whether can work in tf graph mode
-    dct_matrix = tf.tensor_scatter_nd_update(
-        dct_matrix, [[(i, 0)] for i in range(num_mel_bins)],
-        tf.sqrt(1 / tf.cast(num_mel_bins, dtype=dct_matrix.dtype)))
-    dct_matrix = dct_matrix[:, :num_ceps]
-    return dct_matrix
+    return basis
 
 
 def _get_lifter_coeffs(num_ceps: int, cepstral_lifter: float) -> tf.Tensor:
     """Returns a liftering coefficients of size (num_ceps).
 
-  Args:
-    num_ceps: The number of cepstral coefficients.
-    cepstral_lifter: The cepstral lifter coefficient.
+    Args: 
+        num_ceps: The number of cepstral coefficients.
+        cepstral_lifter: The cepstral lifter coefficient.
 
-  Returns:
-    A liftering coefficients of size (num_ceps).
-  """
+    Returns:
+        A liftering coefficients of size (num_ceps).
+    """
 
-    i = tf.range(num_ceps)
-    return 1.0 + 0.5 * cepstral_lifter * tf.sin(
-        tf.math.pi * i / cepstral_lifter)
+    i = tf.range(num_ceps, dtype=tf.float32)
+    return 1.0 + 0.5 * cepstral_lifter * tf.sin(math.pi * i / cepstral_lifter)
 
 
 def mfcc(
@@ -674,10 +666,8 @@ def mfcc(
 
     # size (num_mel_bins, num_ceps)
     dct_matrix = _get_dct_matrix(num_ceps, num_mel_bins)
-
     # size (m, num_ceps)
     feature = tf.matmul(feature, dct_matrix)
-
     if cepstral_lifter != 0.0:
         # size (1, num_ceps)
         lifter_coeffs = _get_lifter_coeffs(num_ceps, cepstral_lifter)[None, :]
