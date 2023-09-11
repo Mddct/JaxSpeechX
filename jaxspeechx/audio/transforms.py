@@ -1,6 +1,8 @@
-from typing import Optional
+from typing import Optional, Tuple
 import tensorflow as tf
 import math
+
+from tensorflow.python.ops.array_ops import lower_bound
 
 
 def _get_sinc_resample_kernel(
@@ -36,7 +38,6 @@ def _get_sinc_resample_kernel(
     t *= base_freq
     t = tf.clip_by_value(t, -lowpass_filter_width, lowpass_filter_width)
     if resampling_method == "sinc_interp_hann":
-        # window = torch.cos(t * math.pi / lowpass_filter_width / 2) ** 2
         window = tf.cos(t * math.pi / lowpass_filter_width / 2)**2
     else:
         if beta is None:
@@ -60,8 +61,8 @@ def _get_sinc_resample_kernel(
 def _apply_sinc_resample_kernel(
     waveform: tf.Tensor,
     orig_freq: tf.Tensor,
-    new_freq: int,
-    gcd: int,
+    new_freq: tf.Tensor,
+    gcd: tf.Tensor,
     kernel: tf.Tensor,
     width: tf.Tensor,
 ):
@@ -78,23 +79,29 @@ def _apply_sinc_resample_kernel(
     shape = tf.concat([tf.constant([-1]), tf.shape(waveform)[-1:]], axis=0)
     waveform = tf.reshape(waveform, shape)
     shape = tf.shape(waveform)
-    _, length = waveform.shape
+    num_wavs, length = waveform.shape
+    # return waveform
     waveform = tf.pad(waveform, ((0, 0), (width, width + orig_freq)))
 
     # kernel = tf.expand_dims(kernel, axis=0)
+    kernel = tf.transpose(kernel, [1, 0, 2])
     src = tf.signal.frame(waveform,
                           frame_length=tf.shape(kernel)[-1],
                           frame_step=orig_freq,
                           axis=-1)  # [..., num_frames, frame_length]
-    dst = src * kernel
+    src = tf.expand_dims(src, axis=2)
+    kernel = tf.expand_dims(kernel, axis=1)
 
+    dst = src * kernel
     resampled = tf.math.reduce_sum(dst, axis=-1, keepdims=False)
+    resampled = tf.reshape(resampled, [num_wavs, -1])
     target_length = tf.cast(tf.math.ceil(new_freq * length / orig_freq),
                             tf.int32)
     resampled = resampled[..., :target_length]
 
     # unpack batch
     shape = tf.concat([shape[:-1], tf.shape(resampled)[-1:]], axis=0)
+
     resampled = tf.reshape(resampled, shape)
     return resampled
 
@@ -128,7 +135,6 @@ def resample(waveform: tf.Tensor,
         width = tf.cast(width, dtype=tf.int32)
 
         # Resample the waveform.
-
         resampled = _apply_sinc_resample_kernel(waveform, orig_freq, new_freq,
                                                 gcd, kernel, width)
         return resampled
@@ -138,3 +144,28 @@ def resample(waveform: tf.Tensor,
         lambda: waveform,
         _resample,
     )
+
+
+def speed(
+    waveform: tf.Tensor,
+    orig_freq: tf.Tensor,
+    factor: tf.Tensor,
+    lengths: Optional[tf.Tensor] = None
+) -> Tuple[tf.Tensor, Optional[tf.Tensor]]:
+    source_sample_rate = tf.cast(factor *
+                                 tf.cast(orig_freq, dtype=factor.dtype),
+                                 dtype=orig_freq.dtype)
+    target_sample_rate = orig_freq
+
+    gcd = tf.experimental.numpy.gcd(source_sample_rate, target_sample_rate)
+    source_sample_rate = source_sample_rate // gcd
+    target_sample_rate = target_sample_rate // gcd
+
+    if lengths is None:
+        out_lengths = None
+    else:
+        out_lengths = tf.math.ceil(lengths * target_sample_rate /
+                                   source_sample_rate)
+
+    return resample(waveform, source_sample_rate,
+                    target_sample_rate), out_lengths
