@@ -2,8 +2,6 @@ from typing import Optional
 import tensorflow as tf
 import math
 
-from tensorflow.python.ops.array_ops import lower_bound
-
 
 def _get_sinc_resample_kernel(
     orig_freq: tf.Tensor,
