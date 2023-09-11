@@ -79,7 +79,6 @@ def _apply_sinc_resample_kernel(
     waveform = tf.reshape(waveform, shape)
     shape = tf.shape(waveform)
     _, length = waveform.shape
-    # return waveform
     waveform = tf.pad(waveform, ((0, 0), (width, width + orig_freq)))
 
     # kernel = tf.expand_dims(kernel, axis=0)
