@@ -164,8 +164,9 @@ def speed(
     if lengths is None:
         out_lengths = None
     else:
-        out_lengths = tf.math.ceil(lengths * target_sample_rate /
-                                   source_sample_rate)
+        out_lengths = tf.cast(tf.math.ceil(lengths * target_sample_rate /
+                                           source_sample_rate),
+                              dtype=lengths.dtype)
 
     return resample(waveform, source_sample_rate,
                     target_sample_rate), out_lengths
