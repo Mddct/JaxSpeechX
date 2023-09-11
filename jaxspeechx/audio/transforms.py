@@ -102,7 +102,6 @@ def _apply_sinc_resample_kernel(
     # unpack batch
     shape = tf.concat([shape[:-1], tf.shape(resampled)[-1:]], axis=0)
 
-    # exit(1)
     resampled = tf.reshape(resampled, shape)
     return resampled
 
@@ -142,8 +141,7 @@ def resample(waveform: tf.Tensor,
 
     return tf.cond(
         orig_freq == new_freq,
-        # lambda: waveform,
-        _resample,
+        lambda: waveform,
         _resample,
     )
 
