@@ -2,8 +2,6 @@ from typing import Optional, Tuple
 import tensorflow as tf
 import math
 
-from tensorflow.python.ops.array_ops import lower_bound
-
 
 def _get_sinc_resample_kernel(
     orig_freq: tf.Tensor,
@@ -79,7 +77,7 @@ def _apply_sinc_resample_kernel(
     shape = tf.concat([tf.constant([-1]), tf.shape(waveform)[-1:]], axis=0)
     waveform = tf.reshape(waveform, shape)
     shape = tf.shape(waveform)
-    num_wavs, length = waveform.shape
+    num_wavs, length = tf.shape(waveform)[0], tf.shape(waveform)[1]
     # return waveform
     waveform = tf.pad(waveform, ((0, 0), (width, width + orig_freq)))
 
@@ -102,7 +100,6 @@ def _apply_sinc_resample_kernel(
     # unpack batch
     shape = tf.concat([shape[:-1], tf.shape(resampled)[-1:]], axis=0)
 
-    # exit(1)
     resampled = tf.reshape(resampled, shape)
     return resampled
 
@@ -142,8 +139,7 @@ def resample(waveform: tf.Tensor,
 
     return tf.cond(
         orig_freq == new_freq,
-        # lambda: waveform,
-        _resample,
+        lambda: waveform,
         _resample,
     )
 
@@ -166,8 +162,9 @@ def speed(
     if lengths is None:
         out_lengths = None
     else:
-        out_lengths = tf.math.ceil(lengths * target_sample_rate /
-                                   source_sample_rate)
+        out_lengths = tf.cast(tf.math.ceil(lengths * target_sample_rate /
+                                           source_sample_rate),
+                              dtype=lengths.dtype)
 
     return resample(waveform, source_sample_rate,
                     target_sample_rate), out_lengths

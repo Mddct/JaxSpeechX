@@ -11,9 +11,9 @@ BLACKMAN = "blackman"
 WINDOWS = [HAMMING, HANNING, POVEY, RECTANGULAR, BLACKMAN]
 
 # numeric_limits<float>::epsilon() 1.1920928955078125e-07
-EPSILON = tf.constant(tf.keras.backend.epsilon(), dtype=tf.float32)
+EPSILON = tf.keras.backend.epsilon()
 # 1 milliseconds = 0.001 seconds
-MILLISECONDS_TO_SECONDS = tf.constant(0.001, dtype=tf.float32)
+MILLISECONDS_TO_SECONDS = 0.001
 
 
 def _next_power_of_2(x):
@@ -94,8 +94,7 @@ def _get_waveform_and_window_properties(
                              tf.shape(waveform)[0],
                              message="Invalid channel size")
     waveform = waveform[channel, :]  # size (n)
-    sample_frequency_f = tf.cast(sample_frequency,
-                                 dtype=MILLISECONDS_TO_SECONDS.dtype)
+    sample_frequency_f = tf.cast(sample_frequency, dtype=tf.float32)
     window_shift = tf.cast(
         sample_frequency_f * float(frame_shift) * MILLISECONDS_TO_SECONDS,
         tf.int32)
