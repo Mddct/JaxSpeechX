@@ -144,6 +144,53 @@ def resample(waveform: tf.Tensor,
     )
 
 
+def add_noise(waveform: tf.Tensor,
+              noise: tf.Tensor,
+              snr: tf.Tensor,
+              lengths: Optional[tf.Tensor] = None) -> tf.Tensor:
+    L = tf.shape(waveform)[-1]
+    L_noise = tf.shape(noise)[-1]
+
+    def length_ge(noise):
+        random_start = tf.random.uniform(shape=(),
+                                         maxval=L - L_noise + 1,
+                                         dtype=tf.int32)
+        noise = tf.pad(noise,
+                       [[0, 0], [random_start, L - L_noise - random_start]])
+        return noise
+
+    def length_lt(noise):
+        random_start = tf.random.uniform(shape=(),
+                                         maxval=L_noise - L + 1,
+                                         dtype=tf.int32)
+        waveform = tf.pad(waveform,
+                          [[0, 0], [random_start, L_noise - L - random_start]])
+        return noise[..., random_start:random_start + L]
+
+    noise = tf.cond(tf.greater(L, L_noise), lambda: length_ge(noise),
+                    lambda: length_lt(noise))
+    # compute scale
+    if lengths is not None:
+        mask = tf.expand_dims(tf.range(0, L, dtype=lengths.dtype),
+                              axis=0) < tf.expand_dims(lengths, axis=-1)
+        masked_waveform = waveform * tf.cast(mask, dtype=waveform.dtype)
+        masked_noise = noise * tf.cast(mask, dtype=noise.dtype)
+    else:
+        masked_waveform = waveform
+        masked_noise = noise
+
+    energy_signal = tf.norm(masked_waveform, ord=2, axis=-1)**2
+    energy_noise = tf.norm(masked_noise, ord=2, axis=-1)**2
+    original_snr_db = 10 * (tf.math.log(energy_signal) -
+                            tf.math.log(energy_noise)) / tf.math.log(10.0)
+    scale = 10**((original_snr_db - snr) / 20.0)
+
+    # scale noise
+    scaled_noise = tf.expand_dims(scale, axis=-1) * noise
+
+    return waveform + scaled_noise
+
+
 def speed(
     waveform: tf.Tensor,
     orig_freq: tf.Tensor,
