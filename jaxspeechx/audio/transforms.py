@@ -163,8 +163,6 @@ def add_noise(waveform: tf.Tensor,
         random_start = tf.random.uniform(shape=(),
                                          maxval=L_noise - L + 1,
                                          dtype=tf.int32)
-        waveform = tf.pad(waveform,
-                          [[0, 0], [random_start, L_noise - L - random_start]])
         return noise[..., random_start:random_start + L]
 
     noise = tf.cond(tf.greater(L, L_noise), lambda: length_ge(noise),
