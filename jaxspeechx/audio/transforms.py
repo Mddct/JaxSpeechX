@@ -213,3 +213,74 @@ def speed(
 
     return resample(waveform, source_sample_rate,
                     target_sample_rate), out_lengths
+
+
+def _apply_convolve_mode(conv_result, x_length, y_length, mode):
+    valid_convolve_modes = ["full", "valid", "same"]
+    if mode == "full":
+        return conv_result
+    elif mode == "valid":
+        target_length = tf.math.maximum(x_length, y_length) - tf.math.minimum(
+            x_length, y_length) + 1
+        start_idx = (tf.shape(conv_result)[-1] - target_length) // 2
+        return conv_result[..., start_idx:start_idx + target_length]
+    elif mode == "same":
+        start_idx = (tf.shape(conv_result)[-1] - x_length) // 2
+        return conv_result[..., start_idx:start_idx + x_length]
+    else:
+        raise ValueError(
+            f"Unrecognized mode value '{mode}'. Please specify one of {valid_convolve_modes}."
+        )
+
+
+def convolve(x, y, mode="full"):
+
+    x_size, y_size = tf.shape(x)[-1], tf.shape(y)[-1]
+    x, y = tf.cond(x_size < y_size, lambda: (y, x), lambda: (x, y))
+    x_size, y_size = tf.shape(x)[-1], tf.shape(y)[-1]
+
+    def reshape_tensors(x, y):
+        new_shape = tf.math.maximum(tf.shape(x)[:-1], tf.shape(y)[:-1])
+        x = tf.broadcast_to(x, tf.concat([new_shape, [x_size]], axis=0))
+        y = tf.broadcast_to(y, tf.concat([new_shape, [y_size]], axis=0))
+        return x, y
+
+    x, y = tf.cond(x_size != y_size, lambda: reshape_tensors(x, y), lambda:
+                   (x, y))
+    x_size, y_size = tf.shape(x)[-1], tf.shape(y)[-1]
+
+    num_signals = tf.reduce_prod(tf.shape(x)[:-1])
+    reshaped_x = tf.reshape(x, (tf.cast(num_signals, tf.int32), x_size))
+    reshaped_y = tf.reshape(y, (tf.cast(num_signals, tf.int32), y_size))
+
+    reshaped_weight = tf.reverse(tf.expand_dims(reshaped_y, axis=-1), axis=[1])
+    reshaped_weight = tf.transpose(reshaped_weight, [1, 0, 2])
+    padding_nums = tf.shape(reshaped_y)[-1] - 1
+    zeros = tf.zeros(
+        tf.concat([tf.shape(reshaped_y)[:-1], [padding_nums]], axis=-1))
+    reshaped_x = tf.concat([zeros, reshaped_x, zeros], axis=-1)
+    # TODO: groups conv1d to support multiple channel
+    output = tf.nn.conv1d(
+        input=tf.expand_dims(reshaped_x, axis=-1),
+        filters=reshaped_weight,
+        stride=1,
+        padding='VALID',
+        data_format='NWC',
+    )
+    output_shape = tf.concat([tf.shape(x)[:-1], [-1]], axis=0)
+    result = tf.reshape(output, output_shape)
+    return _apply_convolve_mode(result, x_size, y_size, mode)
+
+
+def add_rir(waveform: tf.Tensor, rir: tf.Tensor, norm_rir: bool = False):
+    if norm_rir:
+        norm_rir = rir - tf.math.reduce_mean(rir, axis=-1)
+    else:
+        norm_rir = rir
+    size = tf.shape(waveform)[-1]
+    waveform = convolve(waveform, norm_rir, 'full')
+    waveform = waveform[..., :size]
+    # normalize data samples to [-1,1] after rir convolution to avoid nans with fp16 training
+    # https://github.com/NVIDIA/NeMo/blob/main/nemo/collections/asr/parts/preprocessing/perturb.py#L400
+    waveform = waveform / tf.reduce_max(tf.math.abs(waveform), axis=1)
+    return waveform
